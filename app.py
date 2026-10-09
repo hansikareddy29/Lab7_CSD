@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
 """
-High-Performance Geospatial Recommendation API with Road Network Linkages
+Geospatial Recommendation API with Road Network Linkages
 Route: /search/
 Query Parameters / Body:
   - lat: float (Current Latitude)
   - long: float (Current Longitude)
   - cat: str (Category)
   - rad: float (Search Radius)
-  - link: str / file (Road linkage information txt file or content)
+  - link: str / file (Road linkage information txt file)
 
 Ranking:
   - Radius filter: Circular (Euclidean) distance <= rad
@@ -42,7 +41,6 @@ class SpatialEngine:
         self.build_default_grid()
 
     def load_data(self):
-        print(f"Loading locations from {self.csv_path}...")
         raw_cats = {}
         with open(self.csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -92,7 +90,6 @@ class SpatialEngine:
                     adj[u].append((v, w))
                     adj[v].append((u, w))
         self.default_adj = adj
-        print("Default road network constructed (19,800 undirected edges).")
 
     def get_node_id(self, lat: float, lon: float) -> int:
         i = int(round(lat * 99.0))
@@ -102,9 +99,7 @@ class SpatialEngine:
         return self.coord_to_id.get((round(lat, 6), round(lon, 6)))
 
     def parse_links(self, link_source: str) -> dict:
-        """Parse linkage text file or string content into adjacency graph.
-        Follows TA format: Longitude_A Latitude_A Longitude_B Latitude_B
-        Also supports: ID_A ID_B
+        """Parse into adjacency graph.
         """
         if not link_source:
             # Fallback to local link.txt if available, else default grid
@@ -218,8 +213,8 @@ class SpatialEngine:
         # Step 2: Retrieve road network graph
         adj = self.parse_links(link)
 
-        # Step 3: Find starting grid node(s) for the query origin (lat, lon)
-        # Snap or multi-source Dijkstra from the 4 closest surrounding grid corners
+        # Step 3: Find starting grid nodes for the query origin (lat, lon)
+        # multi-source Dijkstra from the 4 closest surrounding grid corners
         # On a 100x100 grid:
         grid_i = lat * 99.0
         grid_j = lon * 99.0
@@ -251,7 +246,7 @@ class SpatialEngine:
             if u in valid_candidate_ids and u not in found_candidates:
                 found_candidates[u] = d
                 # Early stopping: once we have >= top_k candidates and the next distance
-                # in pq is strictly greater than the top_k-th found distance, we can safely stop!
+                # in pq is strictly greater than the top_k-th found distance, we can stop
                 if len(found_candidates) >= top_k:
                     # Check distance of top_k-th candidate
                     kth_dist = sorted(found_candidates.values())[top_k - 1]
@@ -308,13 +303,48 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
+    def _extract_request_params(self) -> dict:
+        parsed_url = urlparse(self.path)
+        params = {}
+
+        # 1. First extract URL query string params
+        if parsed_url.query:
+            query_params = parse_qs(parsed_url.query)
+            for k, v in query_params.items():
+                params[k] = v[0]
+
+        # 2. Next, check if there is a request body (e.g. POST, or GET with body)
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length > 0:
+            body = self.rfile.read(content_length)
+            content_type = self.headers.get("Content-Type", "")
+            
+            # Try parsing JSON body
+            body_params = {}
+            if "application/json" in content_type or body.strip().startswith(b"{"):
+                try:
+                    body_params = json.loads(body.decode("utf-8"))
+                except Exception:
+                    pass
+            else:
+                try:
+                    form_params = parse_qs(body.decode("utf-8"))
+                    body_params = {k: v[0] for k, v in form_params.items()}
+                except Exception:
+                    pass
+
+            # Body parameters override or supplement query parameters
+            for k, v in body_params.items():
+                params[k] = v
+
+        return params
+
     def do_GET(self):
         parsed_url = urlparse(self.path)
         path = parsed_url.path
 
         if path in ("/search/", "/search"):
-            query_params = parse_qs(parsed_url.query)
-            params = {k: v[0] for k, v in query_params.items()}
+            params = self._extract_request_params()
             self._handle_search(params)
         elif path in ("/", "/health", "/health/"):
             self._send_json_response(200, {
@@ -334,33 +364,7 @@ class RecommendationHandler(BaseHTTPRequestHandler):
             self._send_json_response(404, {"error": f"Path '{path}' not found. Please use '/search/'."})
             return
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length) if content_length > 0 else b""
-
-        params = {}
-        content_type = self.headers.get("Content-Type", "")
-
-        # Try parsing JSON body
-        if "application/json" in content_type or body.strip().startswith(b"{"):
-            try:
-                params = json.loads(body.decode("utf-8"))
-            except Exception:
-                params = {}
-        else:
-            # Try form urlencoded
-            try:
-                form_params = parse_qs(body.decode("utf-8"))
-                params = {k: v[0] for k, v in form_params.items()}
-            except Exception:
-                params = {}
-
-        # Merge URL query parameters if present
-        if parsed_url.query:
-            query_params = parse_qs(parsed_url.query)
-            for k, v in query_params.items():
-                if k not in params:
-                    params[k] = v[0]
-
+        params = self._extract_request_params()
         self._handle_search(params)
 
     def _handle_search(self, params: dict):
@@ -404,7 +408,7 @@ class RecommendationHandler(BaseHTTPRequestHandler):
         # Perform recommendation query with road network linkages
         top_ids = ENGINE.query(lat=lat, lon=lon, cat=cat, rad=rad, link=link, top_k=10)
 
-        # Check format preference (default: list of 10 IDs)
+        # Check format preference
         format_pref = params.get("format", "").lower()
         if format_pref == "dict":
             response_payload = {"locations": top_ids}
