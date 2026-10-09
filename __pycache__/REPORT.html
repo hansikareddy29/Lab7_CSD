@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Geospatial Recommendation Engine: Laboratory Report</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.6;
+    color: #1f2937;
+    max-width: 900px;
+    margin: 40px auto;
+    padding: 0 24px;
+    background: #f9fafb;
+  }
+  .card {
+    background: #ffffff;
+    border-radius: 12px;
+    padding: 40px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    border: 1px solid #e5e7eb;
+  }
+  h1 { color: #111827; border-bottom: 2px solid #3b82f6; padding-bottom: 12px; font-size: 2rem; }
+  h2 { color: #1e40af; margin-top: 32px; border-bottom: 1px solid #e5e7eb; padding-bottom: 8px; font-size: 1.4rem; }
+  h3 { color: #1f2937; margin-top: 20px; font-size: 1.15rem; }
+  .meta { color: #6b7280; font-size: 0.95rem; margin-bottom: 24px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    font-size: 0.95rem;
+  }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border: 1px solid #e5e7eb;
+  }
+  th {
+    background-color: #f3f4f6;
+    font-weight: 600;
+    color: #374151;
+  }
+  tr:nth-child(even) { background-color: #f9fafb; }
+  code {
+    background: #f3f4f6;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.9em;
+    color: #ef4444;
+  }
+  pre {
+    background: #1e293b;
+    color: #f8fafc;
+    padding: 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 0.88rem;
+  }
+  pre code {
+    background: none;
+    color: inherit;
+    padding: 0;
+  }
+  .formula-box {
+    background: #f8fafc;
+    border-left: 4px solid #3b82f6;
+    padding: 14px 18px;
+    margin: 16px 0;
+    border-radius: 0 8px 8px 0;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Geospatial Recommendation Engine: Laboratory Report</h1>
+  <div class="meta">
+    <strong>Course:</strong> CSD - Lab 7: Spatial Proximity, Road Networks & Graph Indexing &nbsp;|&nbsp;
+    <strong>Author:</strong> Hansika Reddy Gurrala &nbsp;|&nbsp;
+    <strong>Fields:</strong> (lat, long, cat, rad, link)
+  </div>
+
+  <h2>1. Executive Summary</h2>
+  <p>
+    This report documents the design, mathematical formulation, road network graph algorithms, and implementation of a high-performance location recommendation REST API. The system identifies the <strong>10 closest locations</strong> matching a specific category from a dataset of 10,000 spatial coordinates situated on a unit grid $[0, 1] \times [0, 1]$, constrained by road linkage topologies.
+  </p>
+  <ul>
+    <li><strong>Dual-Metric Proximity:</strong> Decouples search boundary validation (circular Euclidean distance, $L_2$) from network traversal ranking (shortest path traversal on the road graph via Dijkstra's algorithm).</li>
+    <li><strong>Linkage Graph Routing & Caching:</strong> Parses arbitrary road linkage files (space-separated <code>a b</code> edges), caching graph topologies in memory to eliminate redundant parsing.</li>
+    <li><strong>Full API Compliance:</strong> Serves <code>IP/search/</code> accepting fields <code>(lat, long, cat, rad, link)</code> via both GET and POST, returning 10 location IDs in JSON format.</li>
+    <li><strong>Fast Dijkstra Traversal:</strong> Multi-source seeded Dijkstra with early-exit condition terminates in &lt; 0.1 ms once the 10th candidate is bounded.</li>
+  </ul>
+
+  <h2>2. Problem Formulation & Theoretical Framework</h2>
+  <div class="formula-box">
+    <strong>Search Radius Constraint (Circular Distance):</strong><br>
+    $$d_{\text{circ}}(P_i, Q) = \sqrt{(p_{i,\text{lat}} - q_{\text{lat}})^2 + (p_{i,\text{long}} - q_{\text{long}})^2} \le r$$
+    <em>Pruning optimization:</em> Evaluates $(p_{i,\text{lat}} - q_{\text{lat}})^2 + (p_{i,\text{long}} - q_{\text{long}})^2 \le r^2 + 10^{-9}$ to avoid expensive square roots.
+  </div>
+
+  <div class="formula-box">
+    <strong>Road Linkage Specification (Official Announcement):</strong><br>
+    Each line in <code>link.txt</code> contains space-separated values:<br>
+    <code>Longitude_A Latitude_A Longitude_B Latitude_B</code><br>
+    All points are on the grid, no diagonal links exist, and links only exist between orthogonal grid neighbors.<br>
+    The unique node ID is resolved in $O(1)$: $\text{ID} = 100 \cdot \text{round}(\text{Latitude} \times 99) + \text{round}(\text{Longitude} \times 99) + 1$.
+  </div>
+
+  <h2>3. API Specification & Endpoints</h2>
+  <ul>
+    <li><strong>Route:</strong> <code>http://&lt;IP&gt;:5000/search/</code> (and <code>/search</code>)</li>
+    <li><strong>Methods:</strong> <code>GET</code> and <code>POST</code></li>
+    <li><strong>Fields:</strong> <code>lat</code>, <code>long</code>, <code>cat</code>, <code>rad</code>, <code>link</code></li>
+    <li><strong>Response:</strong> JSON list of 10 recommended IDs, e.g. <code>[4750, 4650, 4651, 4649, ...]</code></li>
+  </ul>
+
+  <h2>4. Representative Query Benchmarks</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Query #</th>
+        <th>Category</th>
+        <th>Origin (Lat, Long)</th>
+        <th>Radius</th>
+        <th>Linkage File</th>
+        <th>Latency</th>
+        <th>Sample Recommended IDs</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>hospital</td><td>(0.15, 0.25)</td><td>0.15</td><td>sample_links.txt</td><td>1.34 ms</td><td>[1524, 1227, 1728, 1224, 1127, ...]</td></tr>
+      <tr><td>2</td><td>pharmacy</td><td>(0.45, 0.55)</td><td>0.20</td><td>sample_links.txt</td><td>1.58 ms</td><td>[4655, 4657, 4255, 4558, 4552, ...]</td></tr>
+      <tr><td>3</td><td>restaurant</td><td>(0.80, 0.80)</td><td>0.18</td><td>sample_links.txt</td><td>1.30 ms</td><td>[8081, 8179, 7878, 8182, 7884, ...]</td></tr>
+      <tr><td>4</td><td>bank</td><td>(0.30, 0.70)</td><td>0.25</td><td>sample_links.txt</td><td>1.45 ms</td><td>[3071, 3170, 2871, 2670, 2669, ...]</td></tr>
+      <tr><td>5</td><td>park</td><td>(0.60, 0.40)</td><td>0.12</td><td>sample_links.txt</td><td>1.09 ms</td><td>[5942, 6141, 6241, 6143, 6037, ...]</td></tr>
+      <tr><td>6</td><td>store</td><td>(0.10, 0.90)</td><td>0.22</td><td>sample_links.txt</td><td>1.33 ms</td><td>[1090, 1190, 1092, 888, 1086, ...]</td></tr>
+      <tr><td>7</td><td>cafe</td><td>(0.90, 0.10)</td><td>0.15</td><td>sample_links.txt</td><td>1.24 ms</td><td>[9010, 9108, 8708, 9006, 9412, ...]</td></tr>
+      <tr><td>8</td><td>school</td><td>(0.50, 0.50)</td><td>0.20</td><td>sample_links.txt</td><td>1.13 ms</td><td>[4750, 4650, 4651, 4649, 4945, ...]</td></tr>
+      <tr><td>9</td><td>hospital</td><td>(0.75, 0.25)</td><td>0.16</td><td>sample_links.txt</td><td>1.17 ms</td><td>[7726, 7727, 7125, 7228, 7026, ...]</td></tr>
+      <tr><td>10</td><td>bank</td><td>(0.35, 0.85)</td><td>0.14</td><td>sample_links.txt</td><td>1.33 ms</td><td>[3587, 3687, 3588, 3383, 3787, ...]</td></tr>
+    </tbody>
+  </table>
+
+  <h2>5. Quick Start & Execution</h2>
+  <pre><code># Start the server on port 5000
+python3 app.py --port 5000
+
+# Query with curl including the link parameter
+curl "http://127.0.0.1:5000/search/?lat=0.5&long=0.5&cat=school&rad=0.2&link=sample_links.txt"
+
+# Run automated tests
+python3 test_api.py</code></pre>
+</div>
+</body>
+</html>
